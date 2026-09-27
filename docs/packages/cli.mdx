@@ -168,6 +168,7 @@ npx hyperframes catalog                          # table of everything
 npx hyperframes catalog --type block --tag social
 npx hyperframes catalog --json
 npx hyperframes catalog --human-friendly         # picker; installs on select
+npx hyperframes catalog --installed              # what this project has, and what the video uses
 ```
 
 Filter with `--type` (`block` or `component`) and `--tag` (`social`,
@@ -181,6 +182,19 @@ dimensions, duration and `preview` (`video` and `poster` URLs) when it has them.
 everything, and `--on-device` switches that search from word match to meaning
 search after a one-time 33 MB download. What each does, what is downloaded and
 what stays on your machine: [How catalog search works](/developers/catalog-search).
+
+`--installed` lists the catalog items in the current project instead: name,
+type, file, and whether the video (`index.html`) uses it. Items come from what
+`add` recorded in `hyperframes.json` plus any registry item whose file sits at
+its install path (the configured folder or the default one); those are marked
+"found by file name". A block reads "in use"
+when `index.html` mounts it and "not used" when it does not; a component is
+pasted into your own markup, so it reads "pasted inline, can't tell"; a recorded
+item whose file is gone reads "file removed". It combines with `--type` and
+`--json` (`{ items, scannedFiles, configUnreadable }`, where each item has
+`name`, `type`, `file`, `status` and `foundBy`, and `configUnreadable` says
+`hyperframes.json` could not be read), not with `--query`, `--tag` or
+`--human-friendly`. Run it from a project folder, one with an `index.html`.
 
 ## Bring in source material
 
@@ -1208,7 +1222,7 @@ Telemetry collects command names, render performance, render checkpoint and
 error names, aggregate browser diagnostic counts, browser initialization
 duration and tween count, aggregate video-extraction workload counts (extracted
 frames, VFR preflights), example choices, the names of registry items `add`
-installs, and system info — including a coarse
+installs and of those `catalog --installed` finds in a project, and system info — including a coarse
 environment fingerprint: OS, kernel string, CPU and memory shape, sandbox
 runtime such as gVisor or Docker, and the _name_ of a coding agent driving the
 CLI when one is detected (`claude_code`, `codex`, `cursor`). That name is

@@ -1,8 +1,17 @@
 // fallow-ignore-file code-duplication
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RegistryItem } from "@hyperframes/core";
-import { catalogRow, countUnindexed, pickByName, searchMissCommand } from "./catalog.js";
+import {
+  catalogRow,
+  countUnindexed,
+  installedViewLines,
+  pickByName,
+  searchMissCommand,
+} from "./catalog.js";
 
 /** The whole registry, which is what "in this registry" has to be measured against. */
 const registryNames = new Set(["fade-through", "whip-pan", "count-up"]);
@@ -72,6 +81,7 @@ describe("countUnindexed", () => {
 
 const state = vi.hoisted(() => ({
   registry: [] as Array<{ name: string; type: string; tags?: string[] }>,
+  manifestFetches: 0,
   artifactRevision: "revision-current",
   cachedVectorRevision: "revision-current",
   vectorFetches: 0,
@@ -107,10 +117,10 @@ vi.mock("../registry/resolver.js", () => ({
 }));
 
 vi.mock("../registry/remote.js", () => ({
-  fetchRegistryManifest: async () => ({
-    items: state.registry,
-    catalogArtifact: { revision: state.artifactRevision },
-  }),
+  fetchRegistryManifest: async () => {
+    state.manifestFetches += 1;
+    return { items: state.registry, catalogArtifact: { revision: state.artifactRevision } };
+  },
 }));
 
 vi.mock("@clack/prompts", () => ({
@@ -269,6 +279,7 @@ async function runForExit(
 }
 
 beforeEach(() => {
+  state.manifestFetches = 0;
   state.modelStatus = "ready";
   state.artifactRevision = "revision-current";
   state.cachedVectorRevision = "revision-current";
@@ -888,5 +899,96 @@ describe("catalogRow", () => {
       duration: 5,
       preview,
     });
+  });
+});
+
+describe("installedViewLines", () => {
+  it("says the project has none yet and how to add one", () => {
+    expect(installedViewLines([], true)).toEqual([
+      "No catalog items in this project yet.",
+      '  Browse with "hyperframes catalog", install with "hyperframes add <name>".',
+    ]);
+  });
+
+  it("labels each status, marks items found only by file name, and counts what the video uses", () => {
+    const lines = installedViewLines(
+      [
+        {
+          name: "ai-chat-reveal",
+          type: "block",
+          file: "compositions/ai-chat-reveal.html",
+          status: "in-use",
+          foundBy: "recorded",
+        },
+        {
+          name: "arc-motion-path",
+          type: "component",
+          file: "compositions/components/arc-motion-path.html",
+          status: "pasted-inline",
+          foundBy: "file",
+        },
+      ],
+      true,
+    );
+    expect(lines[2]).toMatch(/^ai-chat-reveal +block +in use +compositions\/ai-chat-reveal\.html$/);
+    expect(lines[3]).toMatch(
+      /pasted inline, can't tell +compositions\/components\/arc-motion-path\.html \(found by file name\)$/,
+    );
+    expect(lines.at(-1)).toBe("2 items, 1 in use by index.html.");
+  });
+
+  it("counts one item in the singular", () => {
+    const one = { name: "glitch", type: "block", file: "compositions/glitch.html" } as const;
+    expect(installedViewLines([{ ...one, status: "not-used", foundBy: "file" }], true).at(-1)).toBe(
+      "1 item, 0 in use by index.html.",
+    );
+  });
+
+  it("says when hyperframes.json could not be read", () => {
+    expect(installedViewLines([], true, true).at(-1)).toBe(
+      "hyperframes.json could not be read: items recorded by hyperframes add are missing.",
+    );
+  });
+
+  it("says when only recorded items could be listed", () => {
+    expect(installedViewLines([], false).at(-1)).toBe(
+      "Registry list unavailable: showing only items recorded by hyperframes add.",
+    );
+  });
+});
+
+describe("catalog --installed", () => {
+  const projects: string[] = [];
+  const inProject = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-catalog-installed-"));
+    projects.push(dir);
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+  };
+  afterEach(() => {
+    vi.mocked(process.cwd).mockRestore();
+    for (const dir of projects.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fails outside a project, as other project commands do, before fetching the registry", async () => {
+    inProject({});
+    const { exitCode, err } = await runForExit({ installed: true });
+    expect(exitCode).toBe(1);
+    expect(err).toContain("No composition found");
+    expect(state.manifestFetches).toBe(0);
+  });
+
+  it("refuses --query before fetching the registry", async () => {
+    inProject({ "index.html": "<html></html>" });
+    const { exitCode, err } = await runForExit({ installed: true, query: "chart" });
+    expect(exitCode).toBe(1);
+    expect(err).toContain("does not combine with --query");
+    expect(state.manifestFetches).toBe(0);
+  });
+
+  it("says in --json when hyperframes.json could not be read", async () => {
+    inProject({ "index.html": "<html></html>", "hyperframes.json": "{ broken" });
+    const out: unknown = JSON.parse(await runCatalog({ installed: true, json: true }));
+    expect(out).toMatchObject({ items: [], scannedFiles: true, configUnreadable: true });
   });
 });

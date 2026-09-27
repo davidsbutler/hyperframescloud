@@ -2,7 +2,11 @@ import type { BrowserInstallFacts } from "../browser/installFacts.js";
 import { redactTelemetryString, type OutputResolutionIssueKind } from "@hyperframes/core";
 import type { SubTimelineWaitOutcome } from "@hyperframes/engine";
 import { FEEDBACK_RATING_SCALE } from "../utils/feedbackRating.js";
-import type { CatalogUsage } from "../utils/catalogUsage.js";
+import type {
+  CatalogUsage,
+  ProjectCatalogItem,
+  ProjectCatalogItems,
+} from "../utils/catalogUsage.js";
 import { flush, shouldTrack, trackEvent } from "./client.js";
 import { readConfig } from "./config.js";
 import { getPowerState } from "./system.js";
@@ -768,6 +772,26 @@ export function trackRenderObservation(props: {
 
 export function trackInitTemplate(templateId: string, props?: { tailwind?: boolean }): void {
   trackEvent("init_template", { template: templateId, tailwind: props?.tailwind });
+}
+
+/**
+ * `hyperframes catalog --installed` ran. Uses render_complete's catalog property names, but its items include those
+ * found by file; item names are public registry names, never paths or content.
+ */
+export function trackCatalogInstalledView(props: {
+  view: ProjectCatalogItems;
+  json: boolean;
+}): void {
+  const count = (keep: (item: ProjectCatalogItem) => boolean) =>
+    props.view.items.filter(keep).length;
+  trackEvent("cli_catalog_installed_view", {
+    ...catalogEventProperties(props.view.usage),
+    registry_items_found_by_file_count: count((item) => item.foundBy === "file"),
+    registry_items_file_missing_count: count((item) => item.status === "file-missing"),
+    registry_blocks_unused_count: count((item) => item.status === "not-used"),
+    scanned_files: props.view.scannedFiles,
+    json: props.json,
+  });
 }
 
 /**
