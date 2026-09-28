@@ -1,12 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { useMountEffect } from "./useMountEffect";
-import {
-  resolveSourceFile,
-  applyPatch,
-  applyPatchByTarget,
-  countTagsWithAttr,
-  type PatchOperation,
-} from "../utils/sourcePatcher";
+import { applyPatchByTarget, countTagsWithAttr, type PatchOperation } from "../utils/sourcePatcher";
 import {
   acceptStudioRuntimeMessage,
   postRuntimeControlMessage,
@@ -49,7 +43,12 @@ interface PickerOptions {
   workspaceFiles?: Record<string, string>;
   /** Callback to sync patched files to the project */
   onSyncFiles?: (files: Record<string, string>) => void;
+  showToast?: (message: string, tone?: "error" | "info") => void;
 }
+
+const NOT_UNIQUE = "not-unique";
+const NOT_UNIQUE_MESSAGE =
+  "Couldn't save that change: the element isn't uniquely identifiable in its file.";
 
 /**
  * Hook for element picking via the HyperFrame runtime's picker API.
@@ -137,18 +136,23 @@ export function useElementPicker(
 
   // Sync immediately (not debounced) — save on every change for reliability
   const syncToSource = useCallback(
-    (picked: PickedElement, live: HTMLElement, iframe: HTMLIFrameElement, op: PatchOperation) => {
+    (
+      picked: PickedElement,
+      live: HTMLElement,
+      iframe: HTMLIFrameElement,
+      op: PatchOperation,
+      revertLive: () => void,
+    ) => {
       const opts = optionsRef.current;
       if (!opts?.workspaceFiles || !opts.onSyncFiles) return;
-      // The hf-id names the element in the file it was served from; an id can repeat across scenes.
-      const hfId = live.getAttribute("data-hf-id");
       const pending = pendingWritesRef.current;
       const files = withPendingWrites(opts.workspaceFiles, pending);
-      const patch = hfId
-        ? patchByIdentity(files, hfId, picked.id, ownSourceFile(live, iframe), op)
-        : picked.id
-          ? patchById(files, picked.id, picked.selector, op)
-          : null;
+      const patch = sourcePatchFor(files, picked, live, iframe, op);
+      if (patch === NOT_UNIQUE) {
+        revertLive();
+        opts.showToast?.(NOT_UNIQUE_MESSAGE, "error");
+        return;
+      }
       if (!patch || patch.after === patch.before) return;
       recordPendingWrite(pending, patch.path, opts.workspaceFiles[patch.path], patch.after);
       opts.onSyncFiles({ [patch.path]: patch.after });
@@ -156,87 +160,78 @@ export function useElementPicker(
     [],
   );
 
-  const setStyle = useCallback(
-    (prop: string, value: string) => {
+  const editPicked = useCallback(
+    (edit: (el: HTMLElement, iframe: HTMLIFrameElement, picked: PickedElement) => void) => {
       const activeIframe = getActiveIframe();
       if (!pickedElement?.selector || !activeIframe) return;
       try {
-        const doc = activeIframe.contentDocument;
-        const el = doc?.querySelector(pickedElement.selector) as HTMLElement | null;
-        if (el) {
-          el.style.setProperty(prop, value);
-          setPickedElement((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  computedStyles: { ...prev.computedStyles, [prop]: value },
-                }
-              : null,
-          );
-          syncToSource(pickedElement, el, activeIframe, {
-            type: "inline-style",
-            property: prop,
-            value,
-          });
-        }
+        const el = activeIframe.contentDocument?.querySelector(pickedElement.selector);
+        if (el) edit(el as HTMLElement, activeIframe, pickedElement);
       } catch {
         /* cross-origin */
       }
     },
-    [pickedElement, getActiveIframe, syncToSource],
+    [pickedElement, getActiveIframe],
+  );
+
+  const restorePicked = useCallback(
+    (snapshot: PickedElement, field: "computedStyles" | "dataAttributes" | "textContent") =>
+      setPickedElement((prev) => (prev ? { ...prev, [field]: snapshot[field] } : null)),
+    [],
+  );
+
+  const setStyle = useCallback(
+    (prop: string, value: string) =>
+      editPicked((el, iframe, picked) => {
+        const styleBefore = el.getAttribute("style");
+        el.style.setProperty(prop, value);
+        setPickedElement((prev) =>
+          prev ? { ...prev, computedStyles: { ...prev.computedStyles, [prop]: value } } : null,
+        );
+        syncToSource(picked, el, iframe, { type: "inline-style", property: prop, value }, () => {
+          if (styleBefore === null) el.removeAttribute("style");
+          else el.setAttribute("style", styleBefore);
+          restorePicked(picked, "computedStyles");
+        });
+      }),
+    [editPicked, syncToSource, restorePicked],
   );
 
   const setDataAttr = useCallback(
-    (attr: string, value: string) => {
-      const activeIframe = getActiveIframe();
-      if (!pickedElement?.selector || !activeIframe) return;
-      try {
-        const doc = activeIframe.contentDocument;
-        const el = doc?.querySelector(pickedElement.selector);
-        if (el) {
-          el.setAttribute(`data-${attr}`, value);
-          setPickedElement((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  dataAttributes: { ...prev.dataAttributes, [attr]: value },
-                }
-              : null,
-          );
-          syncToSource(pickedElement, el as HTMLElement, activeIframe, {
-            type: "attribute",
-            property: attr,
-            value,
-          });
-        }
-      } catch {
-        /* cross-origin */
-      }
-    },
-    [pickedElement, getActiveIframe, syncToSource],
+    (attr: string, value: string) =>
+      editPicked((el, iframe, picked) => {
+        const before = el.getAttribute(`data-${attr}`);
+        el.setAttribute(`data-${attr}`, value);
+        setPickedElement((prev) =>
+          prev ? { ...prev, dataAttributes: { ...prev.dataAttributes, [attr]: value } } : null,
+        );
+        syncToSource(picked, el, iframe, { type: "attribute", property: attr, value }, () => {
+          if (before === null) el.removeAttribute(`data-${attr}`);
+          else el.setAttribute(`data-${attr}`, before);
+          restorePicked(picked, "dataAttributes");
+        });
+      }),
+    [editPicked, syncToSource, restorePicked],
   );
 
   const setTextContent = useCallback(
-    (text: string) => {
-      const activeIframe = getActiveIframe();
-      if (!pickedElement?.selector || !activeIframe) return;
-      try {
-        const doc = activeIframe.contentDocument;
-        const el = doc?.querySelector(pickedElement.selector);
-        if (el) {
-          el.textContent = text;
-          setPickedElement((prev) => (prev ? { ...prev, textContent: text } : null));
-          syncToSource(pickedElement, el as HTMLElement, activeIframe, {
-            type: "text-content",
-            property: "textContent",
-            value: text,
-          });
-        }
-      } catch {
-        /* cross-origin */
-      }
-    },
-    [pickedElement, getActiveIframe, syncToSource],
+    (text: string) =>
+      editPicked((el, iframe, picked) => {
+        const childrenBefore = [...el.childNodes];
+        el.textContent = text;
+        setPickedElement((prev) => (prev ? { ...prev, textContent: text } : null));
+        syncToSource(
+          picked,
+          el,
+          iframe,
+          { type: "text-content", property: "textContent", value: text },
+          () => {
+            el.replaceChildren(...childrenBefore);
+            restorePicked(picked, "textContent");
+          },
+        );
+      }),
+    [editPicked, syncToSource, restorePicked],
   );
 
   // Ref-like object that always points to the active iframe (override or primary)
@@ -325,54 +320,63 @@ interface SourcePatch {
   after: string;
 }
 
-function patchById(
-  files: Record<string, string>,
-  id: string,
-  selector: string,
-  op: PatchOperation,
-): SourcePatch | null {
-  const path = resolveSourceFile(id, selector, files);
-  const before = path ? files[path] : undefined;
-  return path && before ? { path, before, after: applyPatch(before, id, op) } : null;
-}
-
 function ownSourceFile(live: HTMLElement, iframe: HTMLIFrameElement): string {
   const previewed = compositionPathOfPreviewUrl(iframe.getAttribute("src") ?? "");
   return getSourceFileForElement(live, previewed).sourceFile;
 }
 
+// The hf-id names the element in the file it was served from; an id can repeat across scenes.
+function sourcePatchFor(
+  files: Record<string, string>,
+  picked: PickedElement,
+  live: HTMLElement,
+  iframe: HTMLIFrameElement,
+  op: PatchOperation,
+): SourcePatch | typeof NOT_UNIQUE | null {
+  const hfId = live.getAttribute("data-hf-id");
+  return patchByIdentity(files, hfId, picked.id, ownSourceFile(live, iframe), op);
+}
+
 function patchByIdentity(
   files: Record<string, string>,
-  hfId: string,
+  hfId: string | null,
   id: string | null | undefined,
   ownFile: string,
   op: PatchOperation,
-): SourcePatch | null {
+): SourcePatch | typeof NOT_UNIQUE | null {
   const path = identityFile(files, hfId, id, ownFile);
   const before = path ? files[path] : undefined;
   const target = before ? identityTarget(before, hfId, id) : null;
-  return path && before && target
-    ? { path, before, after: applyPatchByTarget(before, target, op) }
-    : null;
+  if (path && before && target)
+    return { path, before, after: applyPatchByTarget(before, target, op) };
+  return heldAnywhere(files, hfId, id) ? NOT_UNIQUE : null;
+}
+
+function heldAnywhere(files: Record<string, string>, hfId: string | null, id?: string | null) {
+  if (hfId && filesHolding(files, "data-hf-id", hfId).length) return true;
+  return Boolean(id && filesHolding(files, "id", id).length);
+}
+
+function filesHolding(files: Record<string, string>, attr: string, value: string): string[] {
+  return Object.keys(files).filter((file) => countTagsWithAttr(files[file] ?? "", attr, value) > 0);
 }
 
 function identityFile(
   files: Record<string, string>,
-  hfId: string,
+  hfId: string | null,
   id: string | null | undefined,
   ownFile: string,
 ): string | undefined {
-  const holding = (attr: string, value: string) =>
-    Object.keys(files).filter((file) => countTagsWithAttr(files[file] ?? "", attr, value) > 0);
-  const withHfId = holding("data-hf-id", hfId);
+  const withHfId = hfId ? filesHolding(files, "data-hf-id", hfId) : [];
   if (withHfId.includes(ownFile)) return ownFile;
   if (withHfId.length === 1) return withHfId[0];
-  const withId = id ? holding("id", id) : [];
+  const withId = id ? filesHolding(files, "id", id) : [];
+  if (withId.includes(ownFile)) return ownFile;
   return withId.length === 1 ? withId[0] : undefined;
 }
 
-function identityTarget(html: string, hfId: string, id: string | null | undefined) {
-  if (countTagsWithAttr(html, "data-hf-id", hfId) === 1) return { hfId };
+function identityTarget(html: string, hfId: string | null, id: string | null | undefined) {
+  if (hfId && countTagsWithAttr(html, "data-hf-id", hfId) === 1) return { hfId };
   if (id && countTagsWithAttr(html, "id", id) === 1) return { id };
   return null;
 }

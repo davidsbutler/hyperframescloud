@@ -43,6 +43,7 @@ function mountPicker(
 ) {
   const iframe = mountPreview(mounted, preview?.page);
   const synced: Record<string, string>[] = [];
+  const toasts: [string, string | undefined][] = [];
   let api: ReturnType<typeof useElementPicker> | null = null;
   let setHostFiles: (next: Record<string, string>) => void = () => {};
   // Like a Studio host: it holds the files in state and rerenders after each write.
@@ -57,6 +58,7 @@ function mountPicker(
           synced.push(changed);
           if (hostAppliesWrites) setFiles((prev) => ({ ...prev, ...changed }));
         },
+        showToast: (message, tone) => toasts.push([message, tone]),
       },
     );
     return null;
@@ -80,8 +82,23 @@ function mountPicker(
   return {
     picker,
     synced,
+    toasts,
+    iframe,
     setHostFiles: (next: Record<string, string>) => act(() => setHostFiles(next)),
   };
+}
+
+function mountOnPage(saved: string, selector: string, id: string) {
+  return mountPicker({ "index.html": saved }, selector, "", true, {
+    page: `<!doctype html><html><body>${saved}</body></html>`,
+    id,
+  });
+}
+
+function expectRefusedStyleEdit({ picker, synced, toasts }: ReturnType<typeof mountPicker>) {
+  act(() => picker().setStyle("color", "red"));
+  expect(synced).toEqual([]);
+  expect(toasts).toHaveLength(1);
 }
 
 describe("an edit to a picked element without an id", () => {
@@ -173,6 +190,47 @@ describe("an edit to a picked element without an id", () => {
   });
 });
 
+describe("an edit that cannot be saved", () => {
+  const saved =
+    '<div data-composition-id="main"><span id="dupe" data-hf-id="hf-x" data-tone="warm">a</span>' +
+    '<span id="dupe" data-hf-id="hf-x">b</span></div>';
+
+  it("puts a data attribute and text back as the file has them", () => {
+    const { picker, synced, toasts, iframe } = mountOnPage(saved, "span:nth-of-type(1)", "dupe");
+    const shownBefore = picker().pickedElement;
+    act(() => picker().setDataAttr("tone", "cold"));
+    act(() => picker().setTextContent("changed"));
+    const live = iframe.contentDocument?.querySelector("span") as HTMLElement;
+    expect([live.getAttribute("data-tone"), live.textContent]).toEqual(["warm", "a"]);
+    expect(picker().pickedElement?.textContent).toBe(shownBefore?.textContent);
+    expect(picker().pickedElement?.dataAttributes).toEqual(shownBefore?.dataAttributes);
+    expect(synced).toEqual([]);
+    expect(toasts).toHaveLength(2);
+  });
+});
+
+describe("an edit that cannot be saved, put back exactly", () => {
+  it("restores an important inline style and child elements as they were", () => {
+    const saved =
+      '<div data-composition-id="main"><p id="dupe" data-hf-id="hf-x" style="color: blue !important">' +
+      '<b>bold</b> text</p><p id="dupe" data-hf-id="hf-x">b</p></div>';
+    const { picker, iframe } = mountOnPage(saved, "p:nth-of-type(1)", "dupe");
+    const live = iframe.contentDocument?.querySelector("p") as HTMLElement;
+    const shownBefore = picker().pickedElement?.computedStyles;
+    act(() => picker().setStyle("color", "red"));
+    act(() => picker().setTextContent("flat"));
+    expect(picker().pickedElement?.computedStyles).toEqual(shownBefore);
+    expect(live.getAttribute("style")).toBe("color: blue !important");
+    expect(live.innerHTML).toBe("<b>bold</b> text");
+  });
+
+  it("refuses an id-only element whose id repeats in its file instead of writing the first", () => {
+    const saved =
+      '<div data-composition-id="main"><span id="dupe">a</span><span id="dupe">b</span></div>';
+    expectRefusedStyleEdit(mountOnPage(saved, "span:nth-of-type(2)", "dupe"));
+  });
+});
+
 describe("an edit to a picked element whose id another scene shares", () => {
   it("writes the scene it was picked in, not the first file with that id", () => {
     const first =
@@ -195,10 +253,7 @@ describe("an edit to a picked element whose id another scene shares", () => {
     const saved =
       '<div data-composition-id="main"><span id="original" data-hf-id="hf-x">a</span>' +
       '<span id="copy" data-hf-id="hf-x">b</span></div>';
-    const { picker, synced } = mountPicker({ "index.html": saved }, "#copy", "", true, {
-      page: `<!doctype html><html><body>${saved}</body></html>`,
-      id: "copy",
-    });
+    const { picker, synced } = mountOnPage(saved, "#copy", "copy");
     act(() => picker().setStyle("color", "red"));
     expect(synced[0]?.["index.html"]).toContain('id="copy" data-hf-id="hf-x" style="color: red"');
     expect(synced[0]?.["index.html"]).toContain('id="original" data-hf-id="hf-x">');
@@ -208,53 +263,40 @@ describe("an edit to a picked element whose id another scene shares", () => {
     const saved =
       '<div data-composition-id="intro"><h1 id="intro" data-hf-id="hf-x">a</h1>' +
       '<h1 id="copy" data-hf-id="hf-x">b</h1></div>';
-    const { picker, synced } = mountPicker({ "index.html": saved }, "#intro", "", true, {
-      page: `<!doctype html><html><body>${saved}</body></html>`,
-      id: "intro",
-    });
+    const { picker, synced } = mountOnPage(saved, "#intro", "intro");
     act(() => picker().setStyle("color", "red"));
     expect(synced[0]?.["index.html"]).toContain('<div data-composition-id="intro">');
     expect(synced[0]?.["index.html"]).toContain('id="intro" data-hf-id="hf-x" style="color: red"');
   });
 
-  it("writes nothing when neither the hf-id nor the id picks one element", () => {
+  it("reverts the preview and says why when neither the hf-id nor the id picks one element", () => {
     const saved =
       '<div data-composition-id="main"><span id="dupe" data-hf-id="hf-x">a</span>' +
       '<span id="dupe" data-hf-id="hf-x">b</span></div>';
-    const { picker, synced } = mountPicker(
-      { "index.html": saved },
-      "span:nth-of-type(2)",
-      "",
-      true,
-      {
-        page: `<!doctype html><html><body>${saved}</body></html>`,
-        id: "dupe",
-      },
-    );
+    const { picker, synced, toasts, iframe } = mountOnPage(saved, "span:nth-of-type(2)", "dupe");
     act(() => picker().setStyle("color", "red"));
     expect(synced).toEqual([]);
+    const live = iframe.contentDocument?.querySelectorAll("span")[1] as HTMLElement;
+    expect(live.style.color).toBe("");
+    expect(toasts).toEqual([
+      ["Couldn't save that change: the element isn't uniquely identifiable in its file.", "error"],
+    ]);
   });
 
-  it("writes nothing by a shared id when the scene is unknown and the hf-id is in two files", () => {
+  it("reverts and says why when the scene is unknown and the hf-id is in two files", () => {
     const first = '<span id="dupe" data-hf-id="hf-x">a</span>';
     const second = '<span id="dupe" data-hf-id="hf-x">b</span>';
-    const { picker, synced } = mountPicker(
-      { "one.html": first, "two.html": second },
-      "#dupe",
-      "",
-      true,
-      { page: `<!doctype html><html><body>${first}</body></html>`, id: "dupe" },
+    expectRefusedStyleEdit(
+      mountPicker({ "one.html": first, "two.html": second }, "#dupe", "", true, {
+        page: `<!doctype html><html><body>${first}</body></html>`,
+        id: "dupe",
+      }),
     );
-    act(() => picker().setStyle("color", "red"));
-    expect(synced).toEqual([]);
   });
 
   it("still saves an element that has an id but no hf-id, by its id", () => {
     const saved = '<div data-composition-id="main"><span id="solo">a</span></div>';
-    const { picker, synced } = mountPicker({ "index.html": saved }, "#solo", "", true, {
-      page: `<!doctype html><html><body>${saved}</body></html>`,
-      id: "solo",
-    });
+    const { picker, synced } = mountOnPage(saved, "#solo", "solo");
     act(() => picker().setStyle("color", "red"));
     expect(synced[0]?.["index.html"]).toContain('style="color: red"');
   });
