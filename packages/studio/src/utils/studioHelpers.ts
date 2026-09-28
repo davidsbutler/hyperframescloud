@@ -1,3 +1,4 @@
+import type { HistoryName } from "@hyperframes/studio-server";
 import { buildProjectApiPath } from "./projectRouting";
 import { isTypingTarget } from "./typingTarget";
 import type { TimelineElement } from "../player/store/playerStore";
@@ -10,9 +11,21 @@ export interface EditingFile {
   content: string | null;
 }
 
+/** A later change as a phrase: `Scout's "Bigger title"`, `your "Moved Title"`, or an outside edit. */
+export function changeName({ label, who }: Pick<HistoryName, "label" | "who">): string {
+  if (who.kind === "outside") return "an edit outside the app";
+  return who.kind === "agent" ? `${who.name}'s "${label}"` : `your "${label}"`;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 export interface AppToast {
   message: string;
   tone: "error" | "info";
+  action?: ToastAction;
 }
 
 export type RightPanelTab =

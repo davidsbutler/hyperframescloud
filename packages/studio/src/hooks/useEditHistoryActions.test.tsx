@@ -4,11 +4,13 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { STUDIO_MOTION_PATH } from "../components/editor/studioMotion";
+import type { HistoryName } from "@hyperframes/studio-server";
 import { useEditHistoryActions, type EditHistoryHandle } from "./useEditHistoryActions";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root | null = null;
+const scout = { kind: "agent", name: "Scout" } as const;
 afterEach(() => act(() => root?.unmount()));
 
 function mount(result: {
@@ -17,10 +19,16 @@ function mount(result: {
   message?: string;
   label?: string;
   paths?: string[];
+  changedSince?: HistoryName;
 }) {
   const editHistory = {
     undo: vi.fn<EditHistoryHandle["undo"]>(async () => result),
     redo: vi.fn<EditHistoryHandle["redo"]>(async () => result),
+    undoEntry: vi.fn<NonNullable<EditHistoryHandle["undoEntry"]>>(async () => ({
+      ok: true,
+      label: "Undid: Agent turn",
+      paths: ["index.html"],
+    })),
   };
   const deps = {
     editHistory,
@@ -39,9 +47,10 @@ function mount(result: {
     actions = useEditHistoryActions(deps);
     return null;
   }
+  const render = () => act(() => root!.render(createElement(Probe)));
   root = createRoot(document.createElement("div"));
-  act(() => root!.render(createElement(Probe)));
-  return { deps, actions };
+  render();
+  return { deps, actions, render };
 }
 
 describe("useEditHistoryActions", () => {
@@ -64,6 +73,63 @@ describe("useEditHistoryActions", () => {
     await act(() => actions.redo());
     expect(deps.forceReloadSdkSession).not.toHaveBeenCalled();
     expect(deps.showToast).toHaveBeenCalledWith("Redid: Split clip", "info");
+  });
+
+  it("names the agent that changed the files since, and offers to undo its change first", async () => {
+    const { deps, actions } = mount({
+      ok: false,
+      reason: "content-mismatch",
+      paths: ["index.html"],
+      changedSince: { id: "turn-1", label: "Bigger title", who: scout, paths: ["index.html"] },
+    });
+    await act(() => actions.undo());
+    expect(deps.showToast).toHaveBeenCalledWith(
+      `Can't undo: Scout's "Bigger title" changed index.html since that edit.`,
+      "info",
+      { label: `Undo Scout's "Bigger title"`, run: expect.any(Function) },
+    );
+    const [, , offer] = deps.showToast.mock.calls[0]!;
+    await act(async () => offer.run());
+    await vi.waitFor(() =>
+      expect(deps.showToast).toHaveBeenCalledWith("Undid: Agent turn", "info"),
+    );
+    expect(deps.editHistory.undoEntry).toHaveBeenCalledWith("turn-1", expect.anything(), [
+      "index.html",
+    ]);
+  });
+
+  it("reloads the SDK session for the composition open when the offer is clicked", async () => {
+    const { deps, actions, render } = mount({
+      ok: false,
+      reason: "content-mismatch",
+      paths: ["scene.html"],
+      changedSince: { id: "turn-1", label: "Agent turn", who: scout, paths: ["scene.html"] },
+    });
+    deps.editHistory.undoEntry.mockResolvedValue({
+      ok: true,
+      label: "Undid: Agent turn",
+      paths: ["scene.html"],
+    });
+    await act(() => actions.undo());
+    const [, , offer] = deps.showToast.mock.calls[0]!;
+    deps.activeCompPath = "scene.html";
+    render();
+    await act(async () => offer.run());
+    await vi.waitFor(() => expect(deps.forceReloadSdkSession).toHaveBeenCalled());
+  });
+
+  it("offers no undo of the later change when a redo is refused", async () => {
+    const { deps, actions } = mount({
+      ok: false,
+      reason: "content-mismatch",
+      paths: ["index.html"],
+      changedSince: { id: "turn-1", label: "Agent turn", who: scout, paths: ["index.html"] },
+    });
+    await act(() => actions.redo());
+    expect(deps.showToast).toHaveBeenCalledWith(
+      "Can't redo: index.html changed since that edit.",
+      "info",
+    );
   });
 
   it("names the files that changed since the edit when an undo is refused", async () => {

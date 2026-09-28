@@ -1,7 +1,9 @@
 // fallow-ignore-file complexity
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { STUDIO_MOTION_PATH } from "../components/editor/studioMotion";
 import { serializeStudioFileMutations } from "../utils/studioFileMutationCoordinator";
+import type { HistoryName } from "@hyperframes/studio-server";
+import { changeName, type ToastAction } from "../utils/studioHelpers";
 
 interface HistoryResult {
   ok: boolean;
@@ -11,6 +13,7 @@ interface HistoryResult {
   paths?: string[];
   /** Per-file restored/previous content, used to soft-apply the preview. */
   files?: Record<string, { previous: string; restored: string }>;
+  changedSince?: HistoryName;
 }
 interface HistoryFileCallbacks {
   readFile: (path: string) => Promise<string>;
@@ -19,6 +22,11 @@ interface HistoryFileCallbacks {
 export interface EditHistoryHandle {
   undo: (cb: HistoryFileCallbacks) => Promise<HistoryResult>;
   redo: (cb: HistoryFileCallbacks) => Promise<HistoryResult>;
+  undoEntry?: (
+    entryId: string,
+    cb: HistoryFileCallbacks,
+    paths?: readonly string[],
+  ) => Promise<HistoryResult>;
   state: {
     undo: ReadonlyArray<{ createdAt: number }>;
     redo: ReadonlyArray<{ createdAt: number }>;
@@ -26,11 +34,11 @@ export interface EditHistoryHandle {
 }
 
 export interface UseEditHistoryActionsOptions {
-  editHistory: Pick<EditHistoryHandle, "undo" | "redo">;
+  editHistory: Pick<EditHistoryHandle, "undo" | "redo" | "undoEntry">;
   readOptionalProjectFile: (path: string) => Promise<string>;
   readProjectFile: (path: string) => Promise<string>;
   writeProjectFile: (path: string, content: string) => Promise<void>;
-  showToast: (message: string, tone?: "error" | "info") => void;
+  showToast: (message: string, tone?: "error" | "info", action?: ToastAction) => void;
   syncHistoryPreviewAfterApply: (restore: Pick<HistoryResult, "paths" | "files">) => Promise<void>;
   waitForPendingDomEditSaves: () => Promise<void>;
   onAfterUndoRedo?: (restore: Pick<HistoryResult, "paths" | "files">) => void;
@@ -53,6 +61,8 @@ export function useEditHistoryActions({
   activeCompPath,
   forceReloadSdkSession,
 }: UseEditHistoryActionsOptions) {
+  const activeCompPathRef = useRef(activeCompPath);
+  activeCompPathRef.current = activeCompPath;
   const readHistoryFile = useCallback(
     (path: string): Promise<string> =>
       path === STUDIO_MOTION_PATH ? readOptionalProjectFile(path) : readProjectFile(path),
@@ -65,18 +75,26 @@ export function useEditHistoryActions({
   );
 
   const apply = useCallback(
-    async (direction: "undo" | "redo") => {
+    async (
+      direction: "undo" | "redo",
+      take: (cb: HistoryFileCallbacks) => Promise<HistoryResult>,
+    ): Promise<void> => {
       const noun = direction === "undo" ? "Undo" : "Redo";
       await waitForPendingDomEditSaves();
-      const result = await editHistory[direction]({
-        readFile: readHistoryFile,
-        serialize: serializeHistoryFiles,
-      });
+      const result = await take({ readFile: readHistoryFile, serialize: serializeHistoryFiles });
       if (!result.ok && result.reason === "content-mismatch") {
-        showToast(
-          `Can't ${direction}: ${result.paths?.join(", ")} changed since that edit.`,
-          "info",
-        );
+        const files = result.paths?.join(", ");
+        const since = result.changedSince;
+        const { undoEntry } = editHistory;
+        if (since && undoEntry && direction === "undo") {
+          const name = changeName(since);
+          showToast(`Can't ${direction}: ${name} changed ${files} since that edit.`, "info", {
+            label: `Undo ${name}`,
+            run: () => void apply("undo", (cb) => undoEntry(since.id, cb, since.paths)),
+          });
+          return;
+        }
+        showToast(`Can't ${direction}: ${files} changed since that edit.`, "info");
         return;
       }
       if (!result.ok && result.reason === "failed") {
@@ -86,7 +104,8 @@ export function useEditHistoryActions({
       if (result.ok && result.label) {
         const restore = { paths: result.paths, files: result.files };
         onAfterUndoRedo?.(restore);
-        if (activeCompPath && result.paths?.includes(activeCompPath)) {
+        const openPath = activeCompPathRef.current;
+        if (openPath && result.paths?.includes(openPath)) {
           forceReloadSdkSession?.();
         }
         await syncHistoryPreviewAfterApply(restore);
@@ -101,12 +120,11 @@ export function useEditHistoryActions({
       waitForPendingDomEditSaves,
       serializeHistoryFiles,
       onAfterUndoRedo,
-      activeCompPath,
       forceReloadSdkSession,
     ],
   );
 
-  const undo = useCallback(() => apply("undo"), [apply]);
-  const redo = useCallback(() => apply("redo"), [apply]);
+  const undo = useCallback(() => apply("undo", editHistory.undo), [apply, editHistory]);
+  const redo = useCallback(() => apply("redo", editHistory.redo), [apply, editHistory]);
   return useMemo(() => ({ undo, redo }), [undo, redo]);
 }

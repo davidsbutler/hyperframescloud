@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { HistoryListItem, HistoryResult } from "@hyperframes/studio-server";
+import type { HistoryListItem, HistoryName, HistoryResult } from "@hyperframes/studio-server";
 import { studioFileContentVersion, studioWriteHeaders } from "../utils/studioFileVersion";
+import { changeName } from "../utils/studioHelpers";
 
 interface RecordEditInput {
   label: string;
@@ -31,6 +32,7 @@ interface ApplyResult {
   label?: string;
   paths?: string[];
   files?: Record<string, ApplyRestoredFile>;
+  changedSince?: HistoryName;
 }
 
 interface NextStep {
@@ -38,6 +40,7 @@ interface NextStep {
   label: string;
   endedAt: number;
   paths: string[];
+  changedSince?: HistoryName;
 }
 
 interface HistoryView {
@@ -160,18 +163,17 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
     [projectId, refresh],
   );
 
-  const step = useCallback(
-    async (direction: "undo" | "redo", callbacks: ApplyCallbacks): Promise<ApplyResult> => {
+  const apply = useCallback(
+    async (
+      path: string,
+      body: object,
+      paths: readonly string[],
+      callbacks: ApplyCallbacks,
+    ): Promise<ApplyResult> => {
       if (!projectId) return { ok: false, reason: "empty" };
-      const next = direction === "undo" ? view.back : view.forward;
-      const paths = [...new Set([...(next?.paths ?? []), ...(heldClaimRef.current?.paths ?? [])])];
       const run = async (): Promise<ApplyResult> => {
         const previous = await readAll(paths, callbacks.readFile);
-        const posted = await post(
-          historyUrl(projectId, "/step"),
-          { direction: direction === "undo" ? "back" : "forward" },
-          studioWriteHeaders(),
-        );
+        const posted = await post(historyUrl(projectId, path), body, studioWriteHeaders());
         heldClaimRef.current = null;
         void refresh();
         // 404: this app keeps no history, so there is nothing to step.
@@ -180,7 +182,8 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
         const reply = posted.body as HistoryResult;
         if (!reply.ok) {
           const { files } = reply.conflict;
-          return { ok: false, reason: "content-mismatch", paths: files };
+          const { changedSince } = reply;
+          return { ok: false, reason: "content-mismatch", paths: files, changedSince };
         }
         if (!reply.entry) return { ok: false, reason: "empty" };
         const changed = reply.entry.files.map((file) => file.path);
@@ -193,7 +196,26 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
       };
       return callbacks.serialize ? callbacks.serialize(paths, run) : run();
     },
-    [projectId, view, refresh],
+    [projectId, refresh],
+  );
+
+  const step = useCallback(
+    (direction: "undo" | "redo", callbacks: ApplyCallbacks) => {
+      const next = direction === "undo" ? view.back : view.forward;
+      const paths = [...new Set([...(next?.paths ?? []), ...(heldClaimRef.current?.paths ?? [])])];
+      const body = { direction: direction === "undo" ? "back" : "forward" };
+      return apply("/step", body, paths, callbacks);
+    },
+    [view, apply],
+  );
+
+  const undoEntry = useCallback(
+    (entryId: string, callbacks: ApplyCallbacks, pathsIfUnseen: readonly string[] = []) => {
+      const entry = view.entries.find((candidate) => candidate.id === entryId);
+      const paths = entry?.files.map((file) => file.path) ?? pathsIfUnseen;
+      return apply("/undo", { entryId }, paths, callbacks);
+    },
+    [view, apply],
   );
 
   const undo = useCallback((callbacks: ApplyCallbacks) => step("undo", callbacks), [step]);
@@ -213,6 +235,7 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
     canUndo: Boolean(view.back),
     canRedo: Boolean(view.forward),
     undoLabel: view.back?.label,
+    undoChangedSince: view.back?.changedSince && changeName(view.back.changedSince),
     redoLabel: view.forward?.label,
     undoPaths: view.back?.paths ?? [],
     redoPaths: view.forward?.paths ?? [],
@@ -220,5 +243,6 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
     recordEdit,
     undo,
     redo,
+    undoEntry,
   };
 }

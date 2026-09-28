@@ -58,7 +58,8 @@ function nextStep(history: ProjectHistory, direction: "back" | "forward") {
   const target = history.next(direction, YOU);
   if (!target) return null;
   const paths = target.files.map((file) => file.path);
-  return { id: target.id, label: target.label, endedAt: target.endedAt, paths };
+  const changedSince = direction === "back" ? history.changedSince(target.id) : undefined;
+  return { id: target.id, label: target.label, endedAt: target.endedAt, paths, changedSince };
 }
 
 /** Runs `task` on the project's history; no history is a 404, an engine refusal ("no longer kept") a 409. */

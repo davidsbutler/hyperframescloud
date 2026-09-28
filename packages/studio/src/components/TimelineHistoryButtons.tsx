@@ -47,12 +47,16 @@ export function TimelineHistoryButtons(props: TimelineHistoryButtonsProps) {
   const shell = useStudioShellContextOptional();
   const onUndo = props.onUndo ?? shell?.handleUndo;
   const onRedo = props.onRedo ?? shell?.handleRedo;
+  const since = shell?.editHistory.undoChangedSince;
+  const shellUndoLabel = since
+    ? `${shell?.editHistory.undoLabel}, changed since by ${since}`
+    : shell?.editHistory.undoLabel;
   return (
     <>
       <HistoryButton
         action="undo"
         can={props.canUndo ?? shell?.editHistory.canUndo ?? false}
-        label={props.undoLabel ?? shell?.editHistory.undoLabel}
+        label={props.undoLabel ?? shellUndoLabel}
         onClick={onUndo}
       />
       <HistoryButton

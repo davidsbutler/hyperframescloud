@@ -173,6 +173,7 @@ describe("openProjectHistory", () => {
     expect(await history.undo(first.id, { who: you })).toEqual({
       ok: false,
       conflict: { files: ["index.html"], newer: [newer.id] },
+      changedSince: { id: newer.id, label: "Retitle", who: agent, paths: ["index.html"] },
     });
     expect([read("index.html"), read("notes.txt")]).toEqual(["C", "n2"]);
 
@@ -1806,6 +1807,98 @@ describe("claim: a writer that records after writing", () => {
     await history.step("forward", you);
 
     expect(history.next("back", you)?.id).toBe(turn!.id);
+  });
+
+  it("names the change made since that is still in effect, past the person's own undo", async () => {
+    const { history, write } = await project({ "index.html": "A" });
+    write("index.html", "B");
+    await history.claim(you, "Moved Title", ["index.html"]);
+    const turn = await change(history, agent, "Agent turn", () => write("index.html", "C"));
+    write("index.html", "D");
+    await history.claim(you, "Moved Title", ["index.html"]);
+    await history.step("back", you);
+
+    expect(await history.step("back", you)).toMatchObject({
+      ok: false,
+      changedSince: { id: turn.id, label: "Agent turn", paths: ["index.html"] },
+    });
+    expect(history.changedSince(history.next("back", you)!.id)?.id).toBe(turn.id);
+  });
+
+  it("names no later change when none of them is still in effect", async () => {
+    const { history, write } = await project({ "index.html": "A" });
+    const first = await change(history, agent, "Agent turn", () => write("index.html", "B"));
+    write("index.html", "C");
+    await history.claim(you, "Moved Title", ["index.html"]);
+    await change(history, agent, "Agent turn 2", () => write("index.html", "D"));
+    await history.undo(first.id, { who: agent, mode: "just-this" });
+
+    const refused = await history.step("back", you);
+    expect(refused).toMatchObject({ ok: false });
+    expect(refused).not.toHaveProperty("changedSince", expect.anything());
+    expect(history.changedSince(history.next("back", you)!.id)).toBeUndefined();
+  });
+
+  it("names a later change still on the blocked file though another of its files moved on", async () => {
+    const { history, write } = await project({ "index.html": "A", "scene.html": "s1" });
+    write("index.html", "B");
+    await history.claim(you, "Moved Title", ["index.html"]);
+    const turn = await change(history, agent, "Agent turn", () => {
+      write("index.html", "C");
+      write("scene.html", "s2");
+    });
+    await change(history, agent, "Agent turn 2", () => write("scene.html", "s3"));
+
+    expect(await history.step("back", you)).toMatchObject({
+      ok: false,
+      changedSince: { id: turn.id, paths: ["index.html", "scene.html"] },
+    });
+  });
+
+  it("names the newest of two later changes still in effect, then the older once it is undone", async () => {
+    const { history, write } = await project({ "a.html": "a1", "b.html": "b1" });
+    write("a.html", "a2");
+    write("b.html", "b2");
+    await history.claim(you, "Moved Title", ["a.html", "b.html"]);
+    const first = await change(history, agent, "T1", () => write("a.html", "a3"));
+    const second = await change(history, agent, "T2", () => write("b.html", "b3"));
+    const blocked = history.next("back", you)!.id;
+
+    expect(history.changedSince(blocked)?.label).toBe("T2");
+    await history.undo(second.id, { who: agent });
+    expect(history.changedSince(blocked)?.id).toBe(first.id);
+  });
+
+  it("names the agent's earlier turn, not its undo of a later one or the turn it undid", async () => {
+    const { history, write } = await project({ "index.html": "A" });
+    write("index.html", "B");
+    await history.claim(you, "Moved Title", ["index.html"]);
+    const first = await change(history, agent, "Agent turn", () => write("index.html", "C"));
+    const second = await change(history, agent, "Agent turn 2", () => write("index.html", "D"));
+    await history.undo(second.id, { who: agent });
+
+    expect(history.changedSince(history.next("back", you)!.id)?.id).toBe(first.id);
+  });
+
+  it("names no change since for an entry still pending", async () => {
+    const { history, write } = await project({ "index.html": "A" });
+    const window = await history.beginWindow(agent, "Agent turn");
+    write("index.html", "B");
+    await history.claim(you, "sweep", []);
+    write("index.html", "C");
+    await history.claim(you, "Dragged Title", ["index.html"], {
+      coalesceKey: "drag",
+      idleMs: 60_000,
+      overwrote: { "index.html": fileContentVersion("B") },
+    });
+    write("index.html", "D");
+    history.noteChange("index.html");
+    await vi.waitFor(() => expect(history.next("back", agent)?.id).toBe(window.id));
+
+    const drag = history.next("back", you)!;
+    expect(drag.label).toBe("Dragged Title");
+    expect(history.changedSince(drag.id)).toBeUndefined();
+    await window.close();
   });
 
   it("undoes a turn's parts last first and keeps the person's edit between them", async () => {

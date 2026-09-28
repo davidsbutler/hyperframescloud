@@ -1,12 +1,18 @@
+import type { ToastAction } from "../utils/studioHelpers";
+
 interface StudioToastProps {
   message: string;
   tone?: "error" | "info";
   /** Plays the exit animation when true (owner removes the node after ~160ms). */
   leaving?: boolean;
+  action?: ToastAction;
   onDismiss?: () => void;
 }
 
-export function StudioToast({ message, tone, leaving, onDismiss }: StudioToastProps) {
+const focusRing =
+  "outline-hidden focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
+export function StudioToast({ message, tone, leaving, action, onDismiss }: StudioToastProps) {
   const isError = tone === "error";
   return (
     <div
@@ -34,11 +40,24 @@ export function StudioToast({ message, tone, leaving, onDismiss }: StudioToastPr
         >
           {message}
         </span>
+        {action && (
+          <button
+            type="button"
+            disabled={leaving}
+            onClick={() => {
+              onDismiss?.();
+              action.run();
+            }}
+            className={`shrink-0 rounded-md px-2 py-1 font-medium text-neutral-100 transition-colors hover:bg-white/10 ${focusRing}`}
+          >
+            {action.label}
+          </button>
+        )}
         {onDismiss && (
           <button
             type="button"
             onClick={onDismiss}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/10 hover:text-neutral-300"
+            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/10 hover:text-neutral-300 ${focusRing}`}
             aria-label="Dismiss"
           >
             <svg

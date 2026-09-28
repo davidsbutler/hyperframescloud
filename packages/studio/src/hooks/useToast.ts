@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { useMountEffect } from "./useMountEffect";
-import type { AppToast } from "../utils/studioHelpers";
+import type { AppToast, ToastAction } from "../utils/studioHelpers";
 
 interface ToastItem extends AppToast {
   id: number;
@@ -15,11 +15,16 @@ const MAX_TOASTS = 3;
 let nextToastId = 1;
 
 /**
- * Stacked toasts (max 3). Info toasts auto-dismiss after 4s; error toasts
- * persist until explicitly dismissed so failures can't silently vanish.
+ * Stacked toasts (max 3). Info toasts auto-dismiss after 4s; error toasts and toasts
+ * with an action persist until dismissed so failures and offers can't silently vanish.
  */
-export function useToast() {
+export function useToast(projectId?: string | null) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [offersFor, setOffersFor] = useState(projectId);
+  if (offersFor !== projectId) {
+    setOffersFor(projectId);
+    setToasts((prev) => prev.filter((toast) => !toast.action));
+  }
   const timersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
 
   const clearTimer = useCallback((id: number) => {
@@ -50,10 +55,12 @@ export function useToast() {
   );
 
   const showToast = useCallback(
-    (message: string, tone: AppToast["tone"] = "error"): number => {
+    (message: string, tone: AppToast["tone"] = "error", action?: ToastAction): number => {
       const id = nextToastId++;
       setToasts((prev) => {
-        const next = [...prev, { id, message, tone }];
+        const repeats = (toast: ToastItem) => action && toast.action && toast.message === message;
+        const withoutRepeat = prev.filter((toast) => !repeats(toast));
+        const next = [...withoutRepeat, { id, message, tone, action }];
         // Cap the stack; drop the oldest (and its pending timer).
         while (next.length > MAX_TOASTS) {
           const dropped = next.shift();
@@ -61,7 +68,7 @@ export function useToast() {
         }
         return next;
       });
-      if (tone !== "error") {
+      if (tone !== "error" && !action) {
         const timer = setTimeout(() => dismissToast(id), AUTO_DISMISS_MS);
         timersRef.current.set(id, timer);
       }
