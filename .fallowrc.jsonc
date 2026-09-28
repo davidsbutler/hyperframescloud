@@ -150,12 +150,7 @@
     },
     {
       "file": "packages/studio/src/utils/timelineAssetDrop.ts",
-      "exports": [
-        "setCompositionDurationToContent",
-        "extendCompositionDurationIfNeeded",
-        "fitTimelineAssetGeometry",
-        "resolveTimelineAssetCompositionSize",
-      ],
+      "exports": ["fitTimelineAssetGeometry", "resolveTimelineAssetCompositionSize"],
     },
     {
       "file": "packages/studio/src/components/sidebar/assetHelpers.ts",

@@ -9,25 +9,26 @@ import {
   type PublishSdkSession,
 } from "../utils/sdkCutover";
 import {
-  buildTimelineMoveTimingPatch,
-  buildTimelineResizeTimingPatch,
   extendRootDurationIfNeeded,
   formatTimelineAttributeNumber,
   formatTimelineMediaOffset,
   patchIframeDomTiming,
+  patchTimelineMoveTiming,
+  patchTimelineResizeTiming,
   persistTimelineBatchEdit,
   type PersistTimelineBatchChange,
+  type PersistTimelineBatchEditInput,
   type RecordEditInput,
 } from "./timelineEditingHelpers";
 import { playbackStartAttributeForElement } from "../player/lib/timelineElementHelpers";
 import {
-  captureDurationRollback,
   finishGroupTimingGsapFallback,
   readFileContent,
   scaleGsapPositions,
   shiftGsapPositions,
-  syncPreviewContentDuration,
 } from "./timelineTimingSync";
+import { captureDurationRollback, syncPreviewContentDuration } from "./timelineLengthSync";
+import { captureLiveLength, isPreviewedFile, readLiveAnimationEnd } from "./timelineEditingGsap";
 import { getStudioSaveErrorMessage } from "../utils/studioSaveDiagnostics";
 
 export interface TimelineGroupMoveChange {
@@ -156,31 +157,23 @@ export function useTimelineGroupEditing({
   const persistServerBatch = useCallback(
     async (
       projectId: string,
-      label: string,
-      batchChanges: PersistTimelineBatchChange[],
-      coalesceKey: string,
-      coalesceMs?: number,
+      changes: PersistTimelineBatchChange[],
+      commit: Pick<
+        PersistTimelineBatchEditInput,
+        "label" | "coalesceKey" | "coalesceMs" | "recordEdit" | "animationEnd"
+      >,
     ) => {
       await persistTimelineBatchEdit({
         projectId,
         activeCompPath,
-        label,
-        changes: batchChanges,
+        changes,
         writeProjectFile,
-        recordEdit,
         pendingTimelineEditPathRef,
-        coalesceKey,
-        coalesceMs,
+        ...commit,
       });
       forceReloadSdkSession?.();
     },
-    [
-      activeCompPath,
-      forceReloadSdkSession,
-      pendingTimelineEditPathRef,
-      recordEdit,
-      writeProjectFile,
-    ],
+    [activeCompPath, forceReloadSdkSession, pendingTimelineEditPathRef, writeProjectFile],
   );
 
   // Shared SDK fast path for group move/resize: eligible when nothing needs the
@@ -199,6 +192,8 @@ export function useTimelineGroupEditing({
       label: string;
       coalesceKey: string;
       coalesceMs?: number;
+      recordEdit: UseTimelineGroupEditingOptions["recordEdit"];
+      animationEnd: number;
     }): Promise<boolean> => {
       const sharedPath = allChangesSharePath(input.changes, activeCompPath);
       const canUseSdk =
@@ -212,7 +207,7 @@ export function useTimelineGroupEditing({
         sharedPath,
         sdkSession,
         {
-          editHistory: { recordEdit },
+          editHistory: { recordEdit: input.recordEdit },
           writeProjectFile,
           reloadPreview,
           compositionPath: activeCompPath,
@@ -224,24 +219,18 @@ export function useTimelineGroupEditing({
           coalesceKey: input.coalesceKey,
           coalesceMs: input.coalesceMs,
           skipRefresh: true,
+          animationEnd: isPreviewedFile(sharedPath, activeCompPath) ? input.animationEnd : 0,
         },
       );
       return cutoverCommittedOrThrow(result);
     },
-    [
-      activeCompPath,
-      projectIdRef,
-      publishSdkSession,
-      recordEdit,
-      reloadPreview,
-      sdkSession,
-      writeProjectFile,
-    ],
+    [activeCompPath, projectIdRef, publishSdkSession, reloadPreview, sdkSession, writeProjectFile],
   );
 
   const handleTimelineGroupMove = useCallback(
     (changes: TimelineGroupMoveChange[], options?: TimelineGroupCommitOptions) => {
       if (changes.length === 0) return Promise.resolve();
+      const [lengthAfterEdit, record] = captureLiveLength(previewIframeRef.current, recordEdit);
       for (const change of changes) {
         const attrs: Array<[string, string]> = [
           ["data-start", formatTimelineAttributeNumber(change.start)],
@@ -277,12 +266,12 @@ export function useTimelineGroupEditing({
       // readout sync below are provable no-ops there — kept unconditional so the
       // duration machinery stays on one code path.
       const needsExtension = extendRootDurationIfNeeded(maxEnd);
-      // Optimistic duration readout: content-driven (grow AND shrink), read from
-      // the just-patched live DOM. See syncPreviewContentDuration.
-      syncPreviewContentDuration(previewIframeRef.current);
+      syncPreviewContentDuration(previewIframeRef.current, lengthAfterEdit());
+      const animationEnd = readLiveAnimationEnd(previewIframeRef.current);
       const coalesceKey = options?.coalesceKey ?? moveCoalesceKey(changes);
       const coalesceMs = options?.coalesceMs;
       const label = options?.label ?? "Move timeline clips";
+      const commit = { label, coalesceKey, coalesceMs, recordEdit: record, animationEnd };
       return enqueueGroupOperation(label, async (projectId) => {
         await options?.beforeTiming;
         const handledBySdk = await trySdkBatchPersist({
@@ -290,18 +279,15 @@ export function useTimelineGroupEditing({
           sdkChanges: toSdkTimingChanges(changes, (change) => ({ start: change.start })),
           eligible: changes.every((change) => change.track == null),
           needsExtension,
-          label,
-          coalesceKey,
-          coalesceMs,
+          ...commit,
         });
         if (!handledBySdk) {
           await persistServerBatch(
             projectId,
-            label,
             changes.map((change) => ({
               element: change.element,
               buildPatches: (original, target) =>
-                buildTimelineMoveTimingPatch(
+                patchTimelineMoveTiming(
                   original,
                   target,
                   change.start,
@@ -309,8 +295,7 @@ export function useTimelineGroupEditing({
                   change.track,
                 ),
             })),
-            coalesceKey,
-            coalesceMs,
+            commit,
           );
         }
         // Track-only: no timing delta → no GSAP positions to shift and no
@@ -340,6 +325,7 @@ export function useTimelineGroupEditing({
               if (delta === 0 || !domId) return null;
               return shiftGsapPositions(projectId, changePath, domId, delta);
             },
+            lengthSync: { lengthAfterEdit, activeCompPath },
           });
         } finally {
           invalidateGsapCache?.();
@@ -373,6 +359,7 @@ export function useTimelineGroupEditing({
   const handleTimelineGroupResize = useCallback(
     (changes: TimelineGroupResizeChange[], options?: TimelineGroupCommitOptions) => {
       if (changes.length === 0) return Promise.resolve();
+      const [lengthAfterEdit, record] = captureLiveLength(previewIframeRef.current, recordEdit);
       for (const change of changes) {
         const liveAttrs: Array<[string, string]> = [
           ["data-start", formatTimelineAttributeNumber(change.start)],
@@ -392,11 +379,17 @@ export function useTimelineGroupEditing({
       // needsExtension gates the SDK path (setTiming can't grow the root duration),
       // so read the store BEFORE the readout sync below optimistically updates it.
       const needsExtension = extendRootDurationIfNeeded(maxEnd);
-      // Optimistic duration readout: content-driven (grow AND shrink), read from
-      // the just-patched live DOM. See syncPreviewContentDuration.
-      syncPreviewContentDuration(previewIframeRef.current);
+      syncPreviewContentDuration(previewIframeRef.current, lengthAfterEdit());
+      const animationEnd = readLiveAnimationEnd(previewIframeRef.current);
       const coalesceKey = options?.coalesceKey ?? resizeCoalesceKey(changes);
       const coalesceMs = options?.coalesceMs;
+      const commit = {
+        label: "Resize timeline clips",
+        coalesceKey,
+        coalesceMs,
+        recordEdit: record,
+        animationEnd,
+      };
       return enqueueGroupOperation("Resize timeline clips", async (projectId) => {
         await options?.beforeTiming;
         const handledBySdk = await trySdkBatchPersist({
@@ -407,25 +400,21 @@ export function useTimelineGroupEditing({
           })),
           eligible: changes.every((change) => !resizeHasPlaybackStartAdjustment(change)),
           needsExtension,
-          label: "Resize timeline clips",
-          coalesceKey,
-          coalesceMs,
+          ...commit,
         });
         if (!handledBySdk) {
           await persistServerBatch(
             projectId,
-            "Resize timeline clips",
             changes.map((change) => ({
               element: change.element,
               buildPatches: (original, target) =>
-                buildTimelineResizeTimingPatch(original, target, change.element, {
+                patchTimelineResizeTiming(original, target, change.element, {
                   start: change.start,
                   duration: change.duration,
                   playbackStart: change.playbackStart,
                 }),
             })),
-            coalesceKey,
-            coalesceMs,
+            commit,
           );
         }
         // See the move path: the timing persist is already on disk, so the GSAP
@@ -459,6 +448,7 @@ export function useTimelineGroupEditing({
                 change.duration,
               );
             },
+            lengthSync: { lengthAfterEdit, activeCompPath },
           });
         } finally {
           invalidateGsapCache?.();
