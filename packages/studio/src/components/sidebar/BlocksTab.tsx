@@ -3,6 +3,7 @@ import { memo, useState, useCallback, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { SearchInput } from "../ui/SearchInput";
 import { PromptPreviewModal } from "./PromptPreviewModal";
+import { BlockGrid } from "./BlockGrid";
 import { useBlockCatalog } from "../../hooks/useBlockCatalog";
 import {
   BLOCK_CATEGORIES,
@@ -29,6 +30,12 @@ export const BlocksTab = memo(function BlocksTab({ onAddBlock, onPreviewBlock }:
   const { loading, error, search, setSearch, category, setCategory, filteredBlocks } =
     useBlockCatalog();
   const [promptModal, setPromptModal] = useState<{ title: string; prompt: string } | null>(null);
+  const gridScrollRef = useRef<HTMLDivElement | null>(null);
+  // A new search or category shows its results from the top.
+  const filterBy = (apply: () => void) => {
+    apply();
+    gridScrollRef.current?.scrollTo({ top: 0 });
+  };
 
   if (loading) {
     return (
@@ -52,7 +59,7 @@ export const BlocksTab = memo(function BlocksTab({ onAddBlock, onPreviewBlock }:
       <div className="px-3 pt-2 pb-1 shrink-0">
         <SearchInput
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => filterBy(() => setSearch(e.target.value))}
           placeholder="Search by name, category, or tag…"
           aria-label="Search blocks"
         />
@@ -61,66 +68,63 @@ export const BlocksTab = memo(function BlocksTab({ onAddBlock, onPreviewBlock }:
       {/* Category pills */}
       <div className="px-3 pt-1 pb-2 shrink-0 overflow-x-auto">
         <div className="flex gap-1">
-          <CategoryPill label="All" active={category === null} onClick={() => setCategory(null)} />
+          <CategoryPill
+            label="All"
+            active={category === null}
+            onClick={() => filterBy(() => setCategory(null))}
+          />
           {BLOCK_CATEGORIES.map((cat) => (
             <CategoryPill
               key={cat.id}
               label={cat.label}
               category={cat.id}
               active={category === cat.id}
-              onClick={() => setCategory(category === cat.id ? null : cat.id)}
+              onClick={() => filterBy(() => setCategory(category === cat.id ? null : cat.id))}
             />
           ))}
         </div>
       </div>
 
       {/* Block grid */}
-      <div className="flex-1 overflow-y-auto min-h-0 px-2 pb-2">
-        {category === "vfx" && (
-          <div className="mb-2 px-2 py-1.5 rounded-md bg-purple-500/10 border border-purple-500/20 text-[9px] text-purple-300 leading-relaxed">
-            VFX blocks use WebGL via HTML-in-Canvas. Enable{" "}
-            <span className="font-mono text-purple-200">chrome://flags/#html-in-canvas</span> for
-            preview.
-          </div>
-        )}
-        {filteredBlocks.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-neutral-600 text-xs">
-            No blocks match your search
-          </div>
-        ) : (
-          <div
-            className="grid gap-1.5"
-            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))" }}
-          >
-            {filteredBlocks.map((block) => {
-              const dur = "duration" in block ? (block.duration as number) : undefined;
-              return (
-                <BlockCard
-                  key={block.name}
-                  name={block.name}
-                  title={block.title}
-                  description={block.description}
-                  blockType={block.type}
-                  duration={dur}
-                  category={block.category}
-                  tags={block.tags}
-                  posterUrl={block.preview?.poster}
-                  videoUrl={block.preview?.video}
-                  onPreview={onPreviewBlock}
-                  onShowPrompt={setPromptModal}
-                  onAdd={
-                    block.category === "vfx" ||
-                    block.category === "social" ||
-                    block.category === "scenes"
-                      ? () => onAddBlock?.(block.name)
-                      : undefined
-                  }
-                />
-              );
-            })}
-          </div>
-        )}
-      </div>
+      <BlockGrid
+        scrollRef={gridScrollRef}
+        blocks={filteredBlocks}
+        notice={
+          category === "vfx" && (
+            <div className="mb-2 px-2 py-1.5 rounded-md bg-purple-500/10 border border-purple-500/20 text-[9px] text-purple-300 leading-relaxed">
+              VFX blocks use WebGL via HTML-in-Canvas. Enable{" "}
+              <span className="font-mono text-purple-200">chrome://flags/#html-in-canvas</span> for
+              preview.
+            </div>
+          )
+        }
+        renderCard={(block) => {
+          const dur = "duration" in block ? (block.duration as number) : undefined;
+          return (
+            <BlockCard
+              key={block.name}
+              name={block.name}
+              title={block.title}
+              description={block.description}
+              blockType={block.type}
+              duration={dur}
+              category={block.category}
+              tags={block.tags}
+              posterUrl={block.preview?.poster}
+              videoUrl={block.preview?.video}
+              onPreview={onPreviewBlock}
+              onShowPrompt={setPromptModal}
+              onAdd={
+                block.category === "vfx" ||
+                block.category === "social" ||
+                block.category === "scenes"
+                  ? () => onAddBlock?.(block.name)
+                  : undefined
+              }
+            />
+          );
+        }}
+      />
       {promptModal &&
         createPortal(
           <PromptPreviewModal
