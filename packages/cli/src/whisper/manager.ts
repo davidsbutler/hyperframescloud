@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { findFFmpeg } from "../browser/ffmpeg.js";
+import { isAttendedTerminal } from "../utils/attendedTerminal.js";
 import { downloadFile } from "../utils/download.js";
+import { sherpaUnsupportedReason } from "./sherpaSupport.js";
 
 const MODELS_DIR = join(homedir(), ".cache", "hyperframes", "whisper", "models");
 const DEFAULT_MODEL = "small.en";
@@ -177,10 +179,22 @@ function hasCmake(): boolean {
 
 export async function ensureWhisper(options?: {
   onProgress?: (msg: string) => void;
+  mayInstall?: boolean;
 }): Promise<WhisperResult> {
   // 1. Already installed?
   const existing = findWhisper();
   if (existing) return existing;
+
+  if (!(options?.mayInstall ?? isAttendedTerminal())) {
+    // Suggest Parakeet only where `models install parakeet` can run.
+    const hint = sherpaUnsupportedReason()
+      ? `Install whisper-cpp: ${getInstallInstructions()}`
+      : "For much better transcripts, run: hyperframes models install parakeet. " +
+        `Or install whisper-cpp: ${getInstallInstructions()}`;
+    throw new WhisperUnavailableError(
+      `whisper-cpp not found, and unattended or --json runs do not install it. ${hint}`,
+    );
+  }
 
   // 2. Try brew (macOS, fastest — pre-built bottle)
   if (platform() === "darwin" && hasBrew()) {

@@ -5,6 +5,7 @@
 // fallow-ignore-file complexity
 import { failCommand, finishCommand } from "../utils/commandResult.js";
 import { writeNewFileSync } from "../utils/writeNewFile.js";
+import { isAttendedTerminal } from "../utils/attendedTerminal.js";
 import { defineCommand, runCommand } from "citty";
 import type { Example } from "./_examples.js";
 
@@ -802,7 +803,7 @@ export default defineCommand({
       modelFlag ?? DEFAULT_MODEL,
       languageFlag,
     );
-    const interactive = !nonInteractive && process.stdout.isTTY === true;
+    const interactive = !nonInteractive && isAttendedTerminal();
 
     if (skipSkillsFlagIgnored) {
       console.log(
@@ -888,13 +889,14 @@ export default defineCommand({
       if (sourceFilePath && !skipTranscribe) {
         try {
           const { ensureWhisper, ensureModel } = await import("../whisper/manager.js");
-          await ensureWhisper();
+          await ensureWhisper({ mayInstall: false });
           await ensureModel(initialTranscriptionModel);
           console.log("Transcribing...");
           const { transcribe: runTranscribe } = await import("../whisper/transcribe.js");
           const result = await runTranscribe(sourceFilePath, destDir, {
             model: modelFlag,
             language: languageFlag,
+            mayInstall: false,
           });
           console.log(
             `Transcribed: ${result.wordCount} words (${result.durationSeconds.toFixed(1)}s)`,
@@ -1069,6 +1071,7 @@ export default defineCommand({
           const { ensureWhisper, ensureModel } = await import("../whisper/manager.js");
           await ensureWhisper({
             onProgress: (msg) => spin.message(msg),
+            mayInstall: true,
           });
           await ensureModel(initialTranscriptionModel, {
             onProgress: (msg) => spin.message(msg),

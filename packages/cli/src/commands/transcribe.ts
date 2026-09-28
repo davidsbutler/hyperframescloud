@@ -336,7 +336,7 @@ async function transcribeAudio(
     );
   }
   const label = (r: Runner) => c.accent(r === "whisper" ? model : "Parakeet");
-  const spin = opts.json ? null : clack.spinner();
+  const spin = opts.json ? null : clack.spinner({ output: process.stderr });
   spin?.start(`Transcribing with ${label(runner)}...`);
   const onProgress = spin ? (msg: string) => spin.message(msg) : undefined;
   let wavPath = inputPath;
@@ -352,6 +352,7 @@ async function transcribeAudio(
             language: opts.language,
             onProgress,
             timeoutMs: opts.timeoutMs,
+            mayInstall: opts.json ? false : undefined,
           });
 
   try {
@@ -450,7 +451,14 @@ async function transcribeAudio(
     if (isWhisperUnavailable(err)) {
       trackTranscribeUnavailable({ optional: opts.optional === true });
       if (opts.json) {
-        console.log(JSON.stringify({ ok: false, skipped: true, reason: "whisper_unavailable" }));
+        console.log(
+          JSON.stringify({
+            ok: false,
+            skipped: true,
+            reason: "whisper_unavailable",
+            error: message,
+          }),
+        );
       } else {
         spin?.stop(c.warn(`Captions skipped — ${message}`));
       }
