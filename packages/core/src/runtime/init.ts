@@ -8,6 +8,7 @@ import { STUDIO_PREVIEW_LAZY_ATTR, STUDIO_PREVIEW_UPCOMING_ATTR } from "../studi
 import { initRuntimeAnalytics, emitAnalyticsEvent } from "./analytics";
 import { injectCompositionCssVariables } from "./getVariables";
 import { createCssAdapter } from "./adapters/css";
+import { createAuthoredCssAnimations } from "./adapters/cssAnimation";
 import { createGsapAdapter } from "./adapters/gsap";
 import { createAnimeJsAdapter } from "./adapters/animejs";
 import { createLottieAdapter } from "./adapters/lottie";
@@ -3883,10 +3884,12 @@ export function initSandboxRuntimeModular(): void {
     compositionId: findRootCompositionElement()?.getAttribute("data-composition-id") ?? null,
   });
 
+  const authoredCss = createAuthoredCssAnimations();
   state.deterministicAdapters = [
-    createWaapiAdapter(),
+    createWaapiAdapter({ authored: authoredCss }),
     createCssAdapter({
       resolveStartSeconds: (element) => resolveStartForElement(element, 0),
+      authored: authoredCss,
     }),
     createAnimeJsAdapter(),
     createLottieAdapter({

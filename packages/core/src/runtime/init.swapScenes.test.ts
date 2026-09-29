@@ -1194,10 +1194,11 @@ window.__timelines.a = tl;`;
 
   it("puts the swapped scene's CSS animations under the playhead", async () => {
     const { root } = trackingRoot();
-    // jsdom has no CSSAnimation; the CSS adapter seeks only its instances, read live document-wide.
+    // jsdom has no CSSAnimation; the CSS adapter seeks only its instances named at discover.
     class CSSAnimation {}
     vi.stubGlobal("CSSAnimation", CSSAnimation);
     const animation = Object.assign(new CSSAnimation(), {
+      animationName: "spin",
       currentTime: null as number | null,
       pause: vi.fn(),
       play: vi.fn(),
