@@ -52,6 +52,18 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
+function abortWhenEither(first: AbortSignal, second: AbortSignal): AbortSignal {
+  const either = new AbortController();
+  const signals = [first, second];
+  const abort = () => {
+    for (const signal of signals) signal.removeEventListener("abort", abort);
+    either.abort(signals.find((signal) => signal.aborted)?.reason);
+  };
+  if (signals.some((signal) => signal.aborted)) abort();
+  else for (const signal of signals) signal.addEventListener("abort", abort);
+  return either.signal;
+}
+
 function releaseDecodedResources(resources: DecodedResources): void {
   for (const url of resources.urls.splice(0)) URL.revokeObjectURL(url);
   for (const canvas of resources.canvases) {
@@ -115,15 +127,25 @@ function loadedResult(
 export async function decodeVideoThumbnail(
   request: VideoThumbnailDecodeRequest,
   signal: AbortSignal,
+  loadStarted: () => void = () => {},
   budgets: Readonly<TimelineViewportBudgets> = TIMELINE_VIEWPORT_BUDGETS,
 ): Promise<ThumbnailLoadedResult> {
   const mediabunny = await import("mediabunny");
   throwIfAborted(signal);
 
+  const fetchReportingResponse: typeof fetch = (url, init) =>
+    fetch(url, {
+      ...init,
+      signal: init?.signal ? abortWhenEither(init.signal, signal) : signal,
+    }).then((response) => {
+      loadStarted();
+      return response;
+    });
   const input = new mediabunny.Input({
-    source: new mediabunny.UrlSource(request.source),
+    source: new mediabunny.UrlSource(request.source, { fetchFn: fetchReportingResponse }),
     formats: mediabunny.ALL_FORMATS,
   });
+  signal.addEventListener("abort", () => input.dispose(), { once: true });
   const resources: DecodedResources = { urls: [], canvases: new Set() };
   try {
     const track = await input.getPrimaryVideoTrack();

@@ -23,7 +23,8 @@ export interface ThumbnailRequest {
   priority: ThumbnailPriority;
   /** Rich work is paused while the timeline is fast-scrolling. */
   rich?: boolean;
-  load: (signal: AbortSignal) => Promise<ThumbnailLoadedResult>;
+  networkVideoLoad?: boolean;
+  load: (signal: AbortSignal, loadStarted: () => void) => Promise<ThumbnailLoadedResult>;
 }
 
 export type ThumbnailSnapshot =
@@ -67,6 +68,7 @@ interface ThumbnailEntry {
   snapshot: ThumbnailSnapshot;
   /** Aborted by the preview-reload hold, to run again once the hold lifts. */
   preempted: boolean;
+  retried: boolean;
 }
 
 const PRIORITY_SCORE: Readonly<Record<ThumbnailPriority, number>> = {
@@ -82,6 +84,8 @@ function concurrencyBucket(kind: ThumbnailJobKind): "video" | "composition" | "g
   if (kind === "composition") return "composition";
   return "general";
 }
+
+class ThumbnailTimeoutError extends Error {}
 
 function errorFrom(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason));
@@ -159,6 +163,7 @@ export class ThumbnailScheduler {
         lastAccess: this.nextSequence++,
         snapshot: Object.freeze({ status: "queued" }),
         preempted: false,
+        retried: false,
       };
       this.entries.set(scopedKey, entry);
     }
@@ -305,6 +310,16 @@ export class ThumbnailScheduler {
           return;
         }
         if (this.requeuePreempted(entry)) return;
+        if (
+          !entry.retried &&
+          entry.request.networkVideoLoad &&
+          reason instanceof ThumbnailTimeoutError
+        ) {
+          entry.retried = true;
+          entry.lastAccess = this.nextSequence++;
+          this.requeue(entry);
+          return;
+        }
         entry.state = "error";
         entry.error = errorFrom(reason);
         entry.failedAt = this.now();
@@ -345,10 +360,14 @@ export class ThumbnailScheduler {
   private requeuePreempted(entry: ThumbnailEntry): boolean {
     if (!entry.preempted || this.entries.get(entry.scopedKey) !== entry) return false;
     entry.preempted = false;
+    this.requeue(entry);
+    return true;
+  }
+
+  private requeue(entry: ThumbnailEntry): void {
     entry.state = "queued";
     entry.snapshot = Object.freeze({ status: "queued" });
     this.notify(entry);
-    return true;
   }
 
   private validateResult(result: ThumbnailLoadedResult): void {
@@ -439,39 +458,47 @@ export class ThumbnailScheduler {
     entry: ThumbnailEntry,
     controller: AbortController,
   ): Promise<ThumbnailLoadedResult> {
-    let load: Promise<ThumbnailLoadedResult>;
-    try {
-      load = entry.request.load(controller.signal);
-    } catch (reason) {
-      load = Promise.reject(reason);
-    }
-
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timeout = setTimeout(() => {
-        if (settled) return;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let cap: ReturnType<typeof setTimeout> | undefined;
+      const settle = () => {
+        if (settled) return false;
         settled = true;
-        controller.abort();
-        reject(
-          new Error(`Thumbnail load timed out after ${this.budgets.thumbnailLoadTimeoutMs}ms`),
-        );
-      }, this.budgets.thumbnailLoadTimeoutMs);
+        clearTimeout(timeout);
+        clearTimeout(cap);
+        return true;
+      };
+      const failAfter = (ms: number) =>
+        setTimeout(() => {
+          if (!settle()) return;
+          controller.abort();
+          reject(new ThumbnailTimeoutError(`Thumbnail load timed out after ${ms}ms`));
+        }, ms);
+      if (entry.request.networkVideoLoad) {
+        cap = failAfter(this.budgets.thumbnailFirstResponseCapMs);
+      }
+      const startTimeout = () => {
+        if (settled || timeout !== undefined) return;
+        clearTimeout(cap);
+        timeout = failAfter(this.budgets.thumbnailLoadTimeoutMs);
+      };
+
+      let load: Promise<ThumbnailLoadedResult>;
+      try {
+        load = entry.request.load(controller.signal, startTimeout);
+      } catch (reason) {
+        load = Promise.reject(reason);
+      }
+      if (!entry.request.networkVideoLoad) startTimeout();
 
       load.then(
         (result) => {
-          if (settled) {
-            this.safeDispose(result.dispose);
-            return;
-          }
-          settled = true;
-          clearTimeout(timeout);
-          resolve(result);
+          if (settle()) resolve(result);
+          else this.safeDispose(result.dispose);
         },
         (reason: unknown) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          reject(reason);
+          if (settle()) reject(reason);
         },
       );
     });
