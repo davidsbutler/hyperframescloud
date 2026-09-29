@@ -243,6 +243,78 @@ describe("createPickerModule", () => {
       ]);
     });
 
+    it("names an element by a selector that finds only it when its id or track is shared", () => {
+      const picker = createPickerModule({ postMessage: createMockPostMessage() });
+      picker.installPickerApi();
+      document.body.innerHTML = `<div id="root" data-composition-id="main">
+        <div data-composition-id="card"><div id="root"><span id="t">x</span></div></div>
+        <div data-track-index="1">a</div><div data-track-index="1" id="clip-b-parent"><p>b</p></div></div>`;
+      const inner = document.querySelector('[data-composition-id="card"] > #root')!;
+      const outer = document.querySelector('[data-composition-id="main"]')!;
+      const clipB = document.getElementById("clip-b-parent")!;
+      clipB.removeAttribute("id");
+      const selectorOf = (el: Element) => {
+        const restore = emulateHitTest(() => [el]);
+        try {
+          return (window as any).__HF_PICKER_API.pickAtPoint(10, 10)?.selector as string;
+        } finally {
+          restore();
+        }
+      };
+
+      expect(selectorOf(inner)).toBe('[data-composition-id="card"] > #root');
+      for (const el of [inner, outer, clipB]) {
+        expect([...document.querySelectorAll(selectorOf(el))]).toEqual([el]);
+      }
+      expect(selectorOf(document.getElementById("t")!)).toBe("#t");
+    });
+
+    it("names a shape in the second of two scenes that share it, not the first scene's", () => {
+      const picker = createPickerModule({ postMessage: createMockPostMessage() });
+      picker.installPickerApi();
+      document.body.innerHTML = `<div data-composition-id="scene-1"><div class="shape"></div></div>
+        <div data-composition-id="scene-2"><div class="shape"></div></div>`;
+      const shape = document.querySelector('[data-composition-id="scene-2"] > .shape')!;
+      const restore = emulateHitTest(() => [shape]);
+      try {
+        const selector = (window as any).__HF_PICKER_API.pickAtPoint(10, 10)?.selector as string;
+        expect([...document.querySelectorAll(selector)]).toEqual([shape]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("names an element under an SVG foreignObject by a selector that finds it", () => {
+      const picker = createPickerModule({ postMessage: createMockPostMessage() });
+      picker.installPickerApi();
+      document.body.innerHTML = `<svg><foreignObject><span>a</span></foreignObject></svg>
+        <svg><foreignObject><span>b</span></foreignObject></svg>`;
+      const target = document.querySelectorAll("span")[1]!;
+      const restore = emulateHitTest(() => [target]);
+      try {
+        const selector = (window as any).__HF_PICKER_API.pickAtPoint(10, 10)?.selector as string;
+        expect(selector).toContain("foreignObject");
+        expect([...document.querySelectorAll(selector)]).toEqual([target]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("names a script-built element whose tag needs escaping by a selector that finds it", () => {
+      const picker = createPickerModule({ postMessage: createMockPostMessage() });
+      picker.installPickerApi();
+      document.body.innerHTML = "";
+      const tags = [document.createElement("x:y"), document.createElement("x:y")];
+      document.body.append(...tags);
+      const restore = emulateHitTest(() => [tags[1]!]);
+      try {
+        const selector = (window as any).__HF_PICKER_API.pickAtPoint(10, 10)?.selector as string;
+        expect([...document.querySelectorAll(selector)]).toEqual([tags[1]]);
+      } finally {
+        restore();
+      }
+    });
+
     it("adopts the override only for the hit test, leaving the DOM and a saved outerHTML untouched", () => {
       const adopted: CSSStyleSheet[] = [];
       Object.defineProperty(document, "adoptedStyleSheets", {

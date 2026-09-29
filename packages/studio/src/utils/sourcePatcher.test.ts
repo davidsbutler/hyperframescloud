@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyPatch,
   applyPatchByTarget,
+  countTagsWithAttr,
   readAttributeByTarget,
   readTagSnippetByTarget,
   type PatchOperation,
@@ -644,5 +645,53 @@ describe("T3 — hfId targeting (spec for R1)", () => {
     expect(bluePos).toBeGreaterThan(-1);
     expect(bluePos).toBeLessThan(h1End);
     expect(result).toContain('<h2 class="b">B</h2>');
+  });
+});
+
+describe("attribute names inside longer ones", () => {
+  const html =
+    '<div data-composition-id="intro"><h1 id="intro" data-src="a.png" src="b.png">T</h1></div>';
+
+  it("patches the tag whose id matches, not one whose data-composition-id does", () => {
+    const patched = applyPatch(html, "intro", {
+      type: "inline-style",
+      property: "color",
+      value: "red",
+    });
+    expect(patched).toContain('<div data-composition-id="intro">');
+    expect(patched).toContain('<h1 id="intro" data-src="a.png" src="b.png" style="color: red">');
+  });
+
+  it("counts and reads an attribute by its own name only", () => {
+    expect(countTagsWithAttr(html, "id", "intro")).toBe(1);
+    expect(countTagsWithAttr('<p data-id="x">', "id", "x")).toBe(0);
+    expect(readAttributeByTarget(html, { id: "intro" }, "src")).toBe("a.png");
+  });
+
+  it("patches src, class and style by their own names, not data-src, data-class or data-style", () => {
+    const tag =
+      '<span data-class="c" style="color: blue">s</span>' +
+      '<img class="c" data-src="a.png" src="b.png" data-style="color: blue" style="color: blue">';
+    const src = applyPatchByTarget(
+      tag,
+      { selector: ".c" },
+      {
+        type: "html-attribute",
+        property: "src",
+        value: "z.png",
+      },
+    );
+    expect(src).toContain('data-src="a.png" src="z.png"');
+    const style = applyPatchByTarget(
+      tag,
+      { selector: ".c" },
+      {
+        type: "inline-style",
+        property: "color",
+        value: "red",
+      },
+    );
+    expect(style).toContain('data-style="color: blue" style="color: red"');
+    expect(style).toContain('<span data-class="c" style="color: blue">');
   });
 });

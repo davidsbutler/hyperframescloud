@@ -4,7 +4,7 @@ import {
   resolveSourceFile,
   applyPatch,
   applyPatchByTarget,
-  findTagByTarget,
+  countTagsWithAttr,
   type PatchOperation,
 } from "../utils/sourcePatcher";
 import {
@@ -140,14 +140,14 @@ export function useElementPicker(
     (picked: PickedElement, live: HTMLElement, iframe: HTMLIFrameElement, op: PatchOperation) => {
       const opts = optionsRef.current;
       if (!opts?.workspaceFiles || !opts.onSyncFiles) return;
-      // No id: the preview's hf-id names the element, in the file it was served from.
+      // The hf-id names the element in the file it was served from; an id can repeat across scenes.
       const hfId = live.getAttribute("data-hf-id");
       const pending = pendingWritesRef.current;
       const files = withPendingWrites(opts.workspaceFiles, pending);
-      const patch = picked.id
-        ? patchById(files, picked.id, picked.selector, op)
-        : hfId
-          ? patchByHfId(files, hfId, ownSourceFile(live, iframe), op)
+      const patch = hfId
+        ? patchByIdentity(files, hfId, picked.id, ownSourceFile(live, iframe), op)
+        : picked.id
+          ? patchById(files, picked.id, picked.selector, op)
           : null;
       if (!patch || patch.after === patch.before) return;
       recordPendingWrite(pending, patch.path, opts.workspaceFiles[patch.path], patch.after);
@@ -341,16 +341,40 @@ function ownSourceFile(live: HTMLElement, iframe: HTMLIFrameElement): string {
   return getSourceFileForElement(live, previewed).sourceFile;
 }
 
-function patchByHfId(
+function patchByIdentity(
   files: Record<string, string>,
   hfId: string,
+  id: string | null | undefined,
   ownFile: string,
   op: PatchOperation,
 ): SourcePatch | null {
-  const matches = Object.keys(files).filter((file) => findTagByTarget(files[file] ?? "", { hfId }));
-  const path = matches.includes(ownFile) ? ownFile : matches.length === 1 ? matches[0] : undefined;
+  const path = identityFile(files, hfId, id, ownFile);
   const before = path ? files[path] : undefined;
-  return path && before ? { path, before, after: applyPatchByTarget(before, { hfId }, op) } : null;
+  const target = before ? identityTarget(before, hfId, id) : null;
+  return path && before && target
+    ? { path, before, after: applyPatchByTarget(before, target, op) }
+    : null;
+}
+
+function identityFile(
+  files: Record<string, string>,
+  hfId: string,
+  id: string | null | undefined,
+  ownFile: string,
+): string | undefined {
+  const holding = (attr: string, value: string) =>
+    Object.keys(files).filter((file) => countTagsWithAttr(files[file] ?? "", attr, value) > 0);
+  const withHfId = holding("data-hf-id", hfId);
+  if (withHfId.includes(ownFile)) return ownFile;
+  if (withHfId.length === 1) return withHfId[0];
+  const withId = id ? holding("id", id) : [];
+  return withId.length === 1 ? withId[0] : undefined;
+}
+
+function identityTarget(html: string, hfId: string, id: string | null | undefined) {
+  if (countTagsWithAttr(html, "data-hf-id", hfId) === 1) return { hfId };
+  if (id && countTagsWithAttr(html, "id", id) === 1) return { id };
+  return null;
 }
 
 /** Read a subset of computed styles from an element in the iframe */
